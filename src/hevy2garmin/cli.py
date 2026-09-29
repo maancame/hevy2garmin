@@ -6,7 +6,9 @@ import argparse
 import getpass
 import json
 import logging
+import os
 import sys
+from pathlib import Path
 
 from hevy2garmin import db
 from hevy2garmin.config import is_configured, load_config, save_config
@@ -41,6 +43,51 @@ def _require_config(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+# Where the login saves its tokens when there is no database. garmin_login.begin() takes the
+# default from auth_kwargs, so this is the folder it writes.
+TOKEN_DIR = "~/.garminconnect"
+
+
+def _uses_database() -> bool:
+    from hevy2garmin.db import get_database_url
+
+    return bool(get_database_url())
+
+
+def _token_folder_problem(token_dir: str | None = None) -> str | None:
+    """Why the Garmin login could not be saved in token_dir, or None when it can.
+
+    garmin-auth only logs a warning when it cannot save the tokens, so without this init
+    prints "Authenticated" and the next command fails with "No cached tokens" (#651). The
+    usual cause is Docker on Linux: the image runs as uid 999, and a bind-mounted folder
+    that Docker created on the host belongs to root.
+    """
+    if _uses_database():
+        return None
+    folder = Path(token_dir or TOKEN_DIR).expanduser()
+    existing = folder
+    while not existing.exists() and existing != existing.parent:
+        existing = existing.parent
+    if os.access(existing, os.W_OK):
+        return None
+    return f"{folder} cannot be written by this user (uid {os.getuid()})"
+
+
+def _tokens_saved(token_dir: str | None = None) -> bool:
+    if _uses_database():
+        return True
+    from garmin_auth.storage import TOKEN_FILE_NAME
+
+    return (Path(token_dir or TOKEN_DIR).expanduser() / TOKEN_FILE_NAME).exists()
+
+
+def _print_token_folder_help(problem: str) -> None:
+    print(f"✗ The Garmin login cannot be saved: {problem}.")
+    print("  In Docker, give the mounted folders to the container's user (uid 999) on the host,")
+    print("  for example: sudo chown -R 999:999 ~/.hevy2garmin ~/.garminconnect")
+    print("  Or use named volumes instead of host folders. See the Docker section of the README.")
+
+
 def _garmin_interactive_login(email: str, password: str) -> None:
     """Two-step Garmin login for the terminal; prints status, never raises."""
     from hevy2garmin import garmin_login
@@ -55,7 +102,18 @@ def _garmin_interactive_login(email: str, password: str) -> None:
         result = garmin_login.complete(result["session_id"], code)
 
     status = result["status"]
-    if status == "success":
+    if status == "success" and not _tokens_saved():
+        print(
+            f"✓ Authenticated as {result.get('display_name') or 'Garmin'}, but the login was not saved."
+        )
+        problem = _token_folder_problem()
+        if problem:
+            _print_token_folder_help(problem)
+        else:
+            print(
+                f"  No token file appeared in {Path(TOKEN_DIR).expanduser()}. Please run init again."
+            )
+    elif status == "success":
         print(f"✓ Authenticated as {result.get('display_name') or 'Garmin'}")
     elif status == "invalid_credentials":
         print("✗ Failed: check your Garmin email and password.")
@@ -103,8 +161,14 @@ def cmd_init(args: argparse.Namespace) -> None:
     email = input(f"Garmin email{email_display}: ").strip() or current_email
     config["garmin_email"] = email
 
+    # Checked before asking for a password, so nobody types a password and an MFA code into a
+    # login whose result is then thrown away (#651).
+    problem = _token_folder_problem()
+    if email and problem:
+        _print_token_folder_help(problem)
+        sys.exit(1)
     # Garmin password (optional — can use saved tokens)
-    if email:
+    elif email:
         pw = getpass.getpass("Garmin password (enter to skip if tokens exist): ")
         if pw:
             print("  Checking Garmin login...")

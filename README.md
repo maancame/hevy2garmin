@@ -172,7 +172,7 @@ After syncing, check [Garmin Connect](https://connect.garmin.com/modern/activiti
 
 ### Docker
 
-The image is the CLI. The dashboard is `web/` (above); this is for one-off or scheduled syncs on a box without Python.
+The image is the CLI. The dashboard is `web/` (above). This is for one-off or scheduled syncs on a box without Python.
 
 ```bash
 git clone https://github.com/drkostas/hevy2garmin.git
@@ -180,19 +180,36 @@ cd hevy2garmin
 docker build -t hevy2garmin .
 ```
 
-Before running in Docker, you need Garmin auth tokens. Either:
-- Run `pip install hevy2garmin && hevy2garmin init` locally (if you have Python), or
-- Run `docker run -it -v ~/.garminconnect:/root/.garminconnect hevy2garmin init` to set up inside Docker interactively
+The container keeps two folders. `/root/.hevy2garmin` holds your settings and the record of what was already synced, and `/root/.garminconnect` holds the Garmin login (it lasts about a year). Mount both, every time, or the next run starts from nothing.
 
-**One-off sync:**
+Named volumes are the simplest way, because Docker gives them to the container's user by itself.
 
 ```bash
+docker run -it \
+  -v hevy2garmin_data:/root/.hevy2garmin \
+  -v garmin_auth:/root/.garminconnect \
+  hevy2garmin init
+
 docker run --rm \
-  -v ~/.hevy2garmin:/root/.hevy2garmin \
-  -v ~/.garminconnect:/root/.garminconnect \
-  -e HEVY_API_KEY=... \
-  -e GARMIN_EMAIL=... \
+  -v hevy2garmin_data:/root/.hevy2garmin \
+  -v garmin_auth:/root/.garminconnect \
   hevy2garmin sync
+```
+
+If you prefer folders on the host, create them first and give them to uid 999, which is the user the image runs as. On Linux, a folder Docker creates for a `-v` mount belongs to root, and the login then cannot be saved.
+
+```bash
+mkdir -p ~/.hevy2garmin ~/.garminconnect
+sudo chown -R 999:999 ~/.hevy2garmin ~/.garminconnect
+docker run -it -v ~/.hevy2garmin:/root/.hevy2garmin -v ~/.garminconnect:/root/.garminconnect hevy2garmin init
+```
+
+A new install has no sync history, so the first `sync` treats your recent Hevy workouts as new. If some of them are already on Garmin Connect, add `--since YYYY-MM-DD` with the day after the last one there.
+
+`sync` runs once and exits. To sync on a schedule, run the same command from cron, for example every two hours.
+
+```bash
+0 */2 * * * docker run --rm -v hevy2garmin_data:/root/.hevy2garmin -v garmin_auth:/root/.garminconnect hevy2garmin sync
 ```
 
 ### Python API
@@ -357,6 +374,8 @@ cd hevy2garmin
 git pull origin main
 docker build -t hevy2garmin .
 ```
+
+Coming from the docker-compose setup? Version 0.12.0 removed `docker-compose.yml` and the dashboard it ran. Your data is still in its two volumes, usually named `hevy2garmin_hevy2garmin_data` and `hevy2garmin_garmin_auth` (check with `docker volume ls`). Use those names in the `-v` options of the [Docker](#docker) commands above and you keep your Garmin login and your sync history.
 
 ### Git clone (local)
 
